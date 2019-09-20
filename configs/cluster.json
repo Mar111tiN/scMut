@@ -1,0 +1,32 @@
+{
+    "__default__" :
+    {
+        "queue"     : "medium_priority",
+        "nCPUs"     : "16",
+        "memory"    : 20000,
+        "resources" : "\"select[mem>20000] rusage[mem=20000] span[hosts=1]\"",
+        "name"      : "JOBNAME.{rule}.{wildcards}",
+        "output"    : "logs/cluster/{rule}.{wildcards}.out",
+        "error"     : "logs/cluster/{rule}.{wildcards}.err"
+    },
+    "split_bam" :
+    {
+        "memory"    : 30000,
+        "resources" : "\"select[mem>30000] rusage[mem=30000] span[hosts=1]\"",
+    },
+    "bam2csv" :
+    {
+        "memory"    : 30000,
+        "resources" : "\"select[mem>30000] rusage[mem=30000] span[hosts=1]\"",
+    },
+    "coverage" :
+    {
+        "memory"    : 30000,
+        "resources" : "\"select[mem>30000] rusage[mem=30000] span[hosts=1]\"",
+    },
+    "combine_coverage" :
+    {
+        "memory"    : 30000,
+        "resources" : "\"select[mem>30000] rusage[mem=30000] span[hosts=1]\"",
+    }
+}

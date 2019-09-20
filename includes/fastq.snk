@@ -1,0 +1,54 @@
+rule get_fastq:
+    input:
+        get_fastq_from_tuples  # looks up samples from 
+    output:
+        "fastq/{sample}_{type}_{read}.fastq"
+    threads: config['fastq']['threads']
+    wildcard_constraints:
+        sample = "[^/]+"
+    run:
+        extension = os.path.splitext(input[0])[1]
+        if extension == '.fastq':
+            shell("ln -s {input} {output}")   # create shortcut to fastq in workdir/fastq
+        elif extension == '.gz':
+            print(f"file extension {extension} --> unzipping with gunzip")
+            shell("gunzip -c {input} > {output}") # uncompress fastq.qz to fastq in workdir/fastq 
+        elif extension == '.bz2':
+            print(f"file extension {extension} --> unzipping with bzcat")
+            shell("bzcat {input} > {output}") # uncompress fastq.qz to fastq in workdir/fastq 
+
+
+def get_trim_params(w):
+    '''
+    accessory for Trimmomatic
+    retrieves settings from config file and translates into Trimmomatic call
+    '''
+    run = config["setup"]["run"]
+    trim_mode = ' '.join(config['trim']['mode']) # concatenate trim mode options
+    if config['trim']['program'] == 'trimmomatic':
+        if run == "SE":
+            input = f"fastq/{w.sample}_{w.type}.fastq"
+            fileout = f"fastq/trimmed/{w.sample}_{w.type}.trim.fastq"
+        elif run == "PE":
+            input = ' '.join([f"fastq/{w.sample}_{w.type}_{read}.fastq" for read in config['samples']['reads']])
+            output = [f"fastq/trimmed/{w.sample}_{w.type}_{config['samples']['reads'][0]}.{trim}.fastq" for trim in config['trim']['output_name']]
+            output += [f"fastq/trimmed/{w.sample}_{w.type}_{config['samples']['reads'][1]}.{trim}.fastq" for trim in config['trim']['output_name']]
+            output = ' '.join(output)
+        return f"{run} -phred{config['setup']['phred']} -threads {config['trim']['threads']} -trimlog logs/trim/{w.sample}_{w.type}.log {input} {output} {trim_mode}"
+
+
+rule trim_fastq_PE:
+    input: 
+        expand("fastq/{{sample}}_{{type}}_{read}.fastq", read=config['samples']['reads'])
+    output: 
+        expand("fastq/trimmed/{{sample}}_{{type}}_{read}.{trim}.fastq", read=config['samples']['reads'], trim=config['trim']['output_name'])
+    conda:
+        "../env/trim-env.yml"
+    threads:
+        config["trim"]["threads"]
+    log:
+        "logs/trim/{sample}_{type}.log"
+    params: 
+        get_trim_params
+    shell:
+        "trimmomatic {params} "

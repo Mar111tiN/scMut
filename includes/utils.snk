@@ -1,0 +1,193 @@
+from subprocess import Popen, PIPE, DEVNULL
+from io import StringIO
+import pandas as pd
+from functools import partial, reduce
+from multiprocessing import Pool
+import pysam
+
+######## BAM2CSV #########################
+
+def bam_generator(bam_file):
+    '''
+    generator yielding chunks of 1
+    '''
+
+    lst = []    
+    with pysam.AlignmentFile(bam_file, "rb") as bam:
+        for i, line in enumerate(bam):
+            row = line.to_dict()
+            row.update({tag.split(':')[0]:tag.split(':')[2] for tag in row['tags']})
+            row.pop('tags')
+            lst.append(row)
+            if i % config['coverage']['chunks'] == 0 and i != 0:
+                df = pd.DataFrame(lst)
+                lst = []
+                yield df
+        yield pd.DataFrame(lst)
+
+
+def get_strand(row):
+    '''
+    returns strand '-' or '+' in bam depending on existence of not-null AN or TX tag
+    '''
+
+    if row['AN'] == row['AN']:
+        row['strand'] = '-'
+        row['transcripts'] = row['AN']
+    else:
+        row['strand'] = '+'
+        row['transcripts'] = row['TX']
+    return row
+
+##### COVERAGE MATRIX ##################
+
+def filtered(cov_df):
+    '''
+    apply reductions, normalizations, cutoffs, etc. on the sub-coverage matrices
+    '''
+
+    # remove all-zero rows
+    cov_df = cov_df.fillna(0)[cov_df.sum(axis=1) != 0].astype('int')
+
+    return cov_df
+
+
+def final_filter(cov_df, average_cutoff):
+    '''
+    filter applied to the final combined coverage df
+    '''
+
+    # apply total read count and average
+    cov_df['total'] = cov_df.sum(axis=1)
+    cov_df['average'] = cov_df['total'] / (cov_df.shape[1] - 1)
+
+    # apply average cutoff
+    # remove columns with below threshold total coverage
+    cov_df = cov_df.loc[:,cov_df.sum() > average_cutoff * cov_df.sum().mean()]
+
+    return cov_df
+
+def get_coverage_matrix(map_df):
+    '''
+    converts a mapping df containing ENST with respective start positions (TransPos)
+    and mapping length (length) to a dict of two coverage matrizes
+    cov5_df aligns transcript coverages to transcript start
+    cov3_df aligns coverage to transcript end
+    '''
+    
+    # init array with proper dimensions (max transcript length x number of unique transcripts)
+    max_trans_len = map_df['TransLength'].max()
+    ENST_list = map_df['ENST'].unique()
+    # print(f'Initializing empty coverage matrix ({max_trans_len}x{len(ENST_list)})')
+    cov_array = np.zeros(shape=(max_trans_len,len( ENST_list)))
+    # dump into cov_dfs
+    ENST_cols = map_df['ENST'].unique()
+    cov5_df = pd.DataFrame(cov_array, columns=ENST_cols, dtype='int')
+    cov3_df = pd.DataFrame(cov_array, columns=ENST_cols, dtype='int')
+    
+    
+    def get_coverage(max_len, row):
+        '''
+        for each map_df entry, increment the fitting section of the transcript column by one
+        '''
+    
+        # for 5' based coverage
+        start = min(int(row['TransPos']), row['TransLength'])
+        end = min(int(row['End']), row['TransLength'])
+        
+        #!!!!!!!!! have to check for end base (include --> [start:end+1] or not include?)
+        
+        cov5_df[row['ENST']][start:end] = cov5_df[row['ENST']][start:end] + 1
+        # for 3' based coverage
+        shift = max_len - row['TransLength']
+        start, end = start + shift, end + shift
+        cov3_df[row['ENST']][start:end] = cov3_df[row['ENST']][start:end] + 1
+    
+    
+    # apply get_coverage on 
+    _ = map_df.apply(partial(get_coverage, max_trans_len), axis=1)
+    
+    # only apply total for the final cov_dfs
+    # cov5_df, cov3_df = get_total(cov5_df), get_total(cov3_df)
+    return {"5": cov5_df, "3": cov3_df}
+
+
+def compress_UB(df):
+    '''
+    used within a pandas group-apply schema
+    df grouped by CB, UB and TransID is collapsed into one df row per coverage island (gap)
+    gaps are identified by non-overlapping reads in position-sorted read group
+    '''
+
+    df = df.sort_values('TransPos')    
+
+    # find the break points
+    df['gap'] = df['TransPos'].gt(df['End'].shift()).astype('int')
+    # id different reads according to gap
+    df['gap'] = df['gap'].cumsum()
+    # groupby the coverage break group and condense individual coverage islands
+    # agg has to contain the neccessary shared columns TransLength because it is needed for coverage computation
+    new_df = df.groupby('gap').agg({'TransLength': 'min', 'TransPos': 'min', 'End': 'max'})
+    return new_df # .reset_index().drop(columns='gap')
+
+
+def apply_coverage(APPRIS, bam_df):
+    '''
+    creates coverage output for all reads and for UMI-compressed reads
+    outputs the merged bam file with all reads covering relevant transcripts and the coverage dict:
+    coverage dict contains the coverage dataframes for all_reads <'Mol'> and for UMI-compressed reads <'UMI'> both aligned to 3' and to 5':
+    coverage = {
+        'Mol': {
+            '3': coverage of all reads 3'-aligned,
+            '5': coverage of all reads 5'-aligned
+        }
+        'UMI': {
+            '3': coverage of UMI-compressed reads 3'-aligned,
+            '5': coverage of UMI-compressed reads 5'-aligned
+        }
+    }
+    '''
+
+    
+    print(f"Processing with {os.getpid()}")
+    # extract the map_df (UMI-unaware)
+    map_df = bam_df['Trans'].str.extractall(r'(?P<ENST>ENST\d+),(?P<strand>[+-])(?P<TransPos>\d+),(?P<length>\d+)M').reset_index().drop(columns='match')
+    map_df.columns = ["org_index", "ENST", "strand", "TransPos", "length"]
+    
+    # merge to reduce map_df to APPRIS transcripts
+    Amap_df = APPRIS.merge(map_df, left_on='TranscriptID', right_on='ENST').drop(columns='TranscriptID')
+    # set to integer values
+    Amap_df['TransPos'] = Amap_df['TransPos'].astype('int')
+    Amap_df['TransLength'] = Amap_df['TransLength'].astype('int')
+    Amap_df['End'] = Amap_df['length'].astype('int') + Amap_df['TransPos'].astype('int')
+    
+    if len(Amap_df.index) == 0:
+        return
+    # compute the coverage (is not UMI-compressed)
+    molecule_coverage = get_coverage_matrix(Amap_df)
+    # merge map_df onto bam_df for UMI-compression
+    merge_df = bam_df.merge(Amap_df, left_index=True, right_on='org_index').drop(columns=["Trans", "org_index", "length"])
+    # compress the UMI reads
+    compressed_df = merge_df.groupby(['CB', 'UB', 'ENST']).apply(compress_UB).reset_index().drop(columns='gap')
+      
+    umi_coverage = get_coverage_matrix(compressed_df)
+    coverage = {'Mol': molecule_coverage, 'UMI': umi_coverage}
+    print(f"{os.getpid()} - coverage matrix completed")
+    return coverage
+
+
+def sort_chr(chrom):
+    '''
+    sorts all types of chrom lists
+    '''
+
+    chrom = chrom.replace('Chr', '').replace('chr', '')
+    assigner = {'X': 50, 'Y': 60, 'M': 70, '*': 80}
+    try:
+        chrom = int(chrom)
+    except ValueError:
+        if chrom in ['X', 'Y', 'M', '*']:
+            chrom = assigner[chrom]
+        else:
+            chrom = 100
+    return chrom

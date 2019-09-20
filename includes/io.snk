@@ -1,0 +1,28 @@
+
+
+
+def get_file_list(path, pattern):
+    return [os.path.join(path, file) for file in os.listdir(path) if pattern in file]
+
+
+def get_script(script_name):
+    return os.path.join(config['snakedir'], config['paths']['scripts'], config['scripts'][script_name])
+
+
+def get_env(ENVNAME):
+    '''
+    retrieves environment variables defined in config-file
+    '''
+    if ENVNAME[0] == '$':
+        ENVNAME = ENVNAME[1:]
+    return os.environ[ENVNAME]
+
+
+
+def full_path(file):
+
+    '''
+    returns the full path to a reference
+    '''
+
+    return os.path.join(config['paths']['ref'], config['ref'][file])

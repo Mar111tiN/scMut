@@ -1,0 +1,145 @@
+import numpy as np
+
+
+rule split_bam:
+    input:
+        os.path.join(config['inputdir'], "{sample}/possorted_genome_bam.bam")  # looks up samples from 
+    output:
+        "bam/{sample}_{chrom}.bam"
+    threads: 1
+    wildcard_constraints:
+        sample = "[^/]+"
+    shell:
+        "samtools view -b {input} {wildcards.chrom} > {output}"
+
+
+rule bam2csv:
+    input:
+        "bam/{sample}_{chrom}.bam"
+    output:
+        "bamcsv/{sample}_{chrom}.csv"
+    threads: 
+        config['bam2csv']['threads'] # for memory allocation
+
+    run:
+        # import the bam_file incrementally using bam_generator
+        bam_df = pd.concat([df for df in bam_generator(str(input))], sort=True)
+ 
+        column_dict = {'name':'Read',
+                   'CB': 'CB',
+                   'UB': 'UB',
+                   # 'flag':'Flag', 
+                   'ref_name':'Chr', 
+                   'ref_pos': 'Pos', 
+                   'cigar':'Cigar', 
+                   'seq':'Seq', 
+                   'qual':'Qual',
+                   'Trans': 'Trans',
+                   'Chr_len': 'Chr_len',  # added
+                   'Introns': 'Introns',  # added
+                   'Soft_start': 'Soft_start'
+                   # 'GX': 'GeneID', 
+                   # 'GN': 'Gene',
+                  }
+        # get the dict of the columns
+        columns = list(column_dict.values())
+    
+    
+        ########## ADD COLUMNS ##############################
+        # condense the transcript info
+        bam_df['Trans'] = bam_df['TX'].fillna('') + bam_df['AN'].fillna('')
+    
+        # convert to int
+        bam_df['ref_pos'] = bam_df['ref_pos'].astype(int)
+        bam_df['read_len'] = bam_df['seq'].str.len()  # only for debugging
+    
+        # extract the intron sizes from the cigar string
+        if 'Chr_len' in columns:
+            bam_df['Chr_len'] = bam_df['cigar'].str.extractall(r'M([0-9]+)N').astype(int).groupby(level=0).apply(sum)
+            bam_df['Chr_len'] = bam_df['Chr_len'].fillna(0).astype(int) + bam_df['read_len']
+    
+        if 'Introns' in columns:
+            bam_df['Introns'] = bam_df['cigar'].str.count(r'N|I')
+    
+        # extraction of soft-clipped bases
+        if 'Soft_start' in columns:
+            bam_df['Soft_start'] = bam_df['cigar'].str.extract(r'(^[0-9]+)S').fillna(0).astype(int)
+    
+        bam_df = bam_df.rename(columns=column_dict)
+        bam_df = bam_df.query('CB == CB and UB == UB and Trans != ""')
+        
+        # write to file
+        bam_df[columns].to_csv(str(output), sep='\t', compression='gzip', index=False)
+        print(f"Compressing {str(input)} into {str(output)}")
+
+
+rule coverage:
+    input:
+        "bamcsv/{sample}_{chrom}.csv"
+    output:
+        expand("covcsv/{{sample}}/{{sample}}_{{chrom}}_{cov_level}_{orient}.csv", cov_level=['Mol', 'UMI'], orient=['5', '3'])
+    threads:
+        config['coverage']['threads']
+    run:
+        appris_df = pd.read_csv(full_path('APPRIS'), sep='\t')
+        appris_df.columns = [colname if colname != 'TranscriptLength' else 'TransLength' for colname in appris_df.columns ]
+        APPRIS_list = appris_df.loc[:,['GeneName', 'TranscriptID', 'TransLength']]
+        
+        GOI_list = config['coverage']['GOI_list']
+        # reduce transcripts to Genes-of-Interest
+        if GOI_list:
+            APPRIS_list = APPRIS_list.query('GeneName in @GOI_list')
+        if APPRIS_list.empty:
+            print('No Genes of Interest detected')
+
+        bam_gen = pd.read_csv(str(input), sep='\t', compression='gzip', chunksize=config['coverage']['chunks'])
+        coverage_pool = Pool(threads)
+        # multithreaded dfs into coverage_dicts
+        coverage_dicts = list(coverage_pool.imap_unordered(partial(apply_coverage, APPRIS_list), bam_gen))
+        coverage_pool.close()
+
+        # remove none dicts
+        coverage_dicts = [coverage_dict for coverage_dict in coverage_dicts if coverage_dict]
+        coverage_dict = {}
+        for cov_level in ['Mol', 'UMI']:
+            coverage_dict[cov_level] = {}
+            for orient in ['5', '3']:
+                # flatten coverage_dict to list of dfs
+                coverage_dfs = [cov_dict[cov_level][orient] for cov_dict in coverage_dicts]
+                # reduce list of dfs to accumulated coverage_df
+                coverage_df = reduce(lambda aggr_df, df: aggr_df.add(df, fill_value=0), coverage_dfs)
+                # apply conversion etc
+                # lose zero columns
+                coverage_df = filtered(coverage_df)
+                coverage_dict[cov_level][orient] = coverage_df
+                cov_file = f"{str(output[0]).replace('_Mol_5.csv', '')}_{cov_level}_{orient}.csv"
+                print(f'Writing {cov_file} to csv')
+                coverage_df.to_csv(cov_file, sep='\t', compression='gzip')
+
+
+chroms = [num + 1 for num in range(22)]
+rule combine_coverage:
+    input:
+        expand("covcsv/{{sample}}/{{sample}}_{chrom}_{{cov_level}}_{{orient}}.csv", chrom=chroms) # expand all chrom subfiles
+    output:
+        "covcsv/{sample}_{cov_level}_{orient}.csv"
+    threads:
+        config['combine_coverage']['threads']
+    run:
+        dfs = []
+        print(f"Collecting split csv-files for {str(output)}")
+        for inp in input:
+            # read input and convert into sparse df
+            df = pd.read_csv(str(inp), compression='gzip', sep='\t', index_col=0).astype(pd.SparseDtype("int", 0))
+            dfs.append(df)
+        combined_cov = pd.concat(dfs, axis=1).fillna(0).astype('int')
+        print(f'Concated files for {str(output)} into final dataframe')
+        combined_cov.to_csv(str(output), sep='\t', compression='gzip')
+
+        # apply filtering, normalization, etc.
+        final_cov = final_filter(combined_cov, config['combine_coverage']['average_cutoff'])
+        print(f'Applied filtering for {str(output)}')
+        outfile = str(output).replace('.csv', '.filtered.csv')
+        # write to file
+        final_cov.to_csv(str(output), sep='\t', compression='gzip')
+        print(f'Combined coverage written to {str(output)}')

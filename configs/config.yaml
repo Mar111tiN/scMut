@@ -1,0 +1,38 @@
+inputdir: /fast/users/szyskam_c/work/projects/Chromium/UPN292/CRcount
+workdir: /fast/users/szyskam_c/scratch/projects/UPN292 #here your results are created
+snakedir: /fast/users/szyskam_c/snakes/projects/scMut
+samples:
+  - UPN292-1000-AdLig
+  - UPN292-1000-direct
+  - UPN292-1000-GEX
+  - UPN292-AdLig
+  - UPN292-direct
+  - UPN292-GEX
+#### ABSOLUTE PATHS ############
+paths:
+  ref: /fast/groups/ag_damm/work/ref/annotation/csv
+  scripts: scripts/ # folder relative to snakedir
+#### REF SECTION ###############
+ref:
+  APPRIS: Gencode29-Trans_APPRIS_short.csv
+#### TOOLS SECTION ##############
+tools:
+  gatk: gatk # 
+  gatk3: java -jar /fast/users/szyskam_c/work/utils/gatk3.8/GenomeAnalysisTK.jar -T
+  annovar: perl /fast/users/szyskam_c/tools/annovar_2018
+scripts:
+  prettifyBED : prettify_BEDcoverage.awk
+  format_bed_coverage: formatCoverage.sh
+  anno_format: anno_format.mawk
+  expand_info: expand_info.sh
+  merge_anno: merge_anno.py
+  filter_csv: filter_exome_wFlankingSeq.sh
+bam2csv:
+  threads: 4
+coverage:
+  threads: 20
+  chunks: 25000
+  GOI_list: 
+combine_coverage:
+  threads: 4
+  average_cutoff: 3 # keep only transcripts with total coverage N times above average
