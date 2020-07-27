@@ -1,0 +1,4 @@
+ModuleNotFoundError in line 2 of /fast/home/users/szyskam_c/snakes/projects/scMut/includes/utils.snk:
+No module named 'pysam'
+  File "/fast/home/users/szyskam_c/snakes/projects/scMut/Snakefile", line 17, in <module>
+  File "/fast/home/users/szyskam_c/snakes/projects/scMut/includes/utils.snk", line 2, in <module>

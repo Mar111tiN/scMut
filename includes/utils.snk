@@ -1,8 +1,4 @@
-from subprocess import Popen, PIPE, DEVNULL
-from io import StringIO
 import pandas as pd
-from functools import partial, reduce
-from multiprocessing import Pool
 import pysam
 
 ######## BAM2CSV #########################

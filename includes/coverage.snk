@@ -1,5 +1,6 @@
 import numpy as np
-
+from functools import partial, reduce
+from multiprocessing import Pool
 
 rule split_bam:
     input:
@@ -72,7 +73,6 @@ rule bam2csv:
         bam_df[columns].to_csv(str(output), sep='\t', compression='gzip', index=False)
         print(f"Compressing {str(input)} into {str(output)}")
 
-
 rule coverage:
     input:
         "bamcsv/{sample}_{chrom}.csv"
@@ -141,5 +141,5 @@ rule combine_coverage:
         print(f'Applied filtering for {str(output)}')
         outfile = str(output).replace('.csv', '.filtered.csv')
         # write to file
-        final_cov.to_csv(str(output), sep='\t', compression='gzip')
+        final_cov.to_csv(outfile, sep='\t', compression='gzip')
         print(f'Combined coverage written to {str(output)}')
